@@ -1,18 +1,14 @@
 # -*- coding: utf-8 -*-
 import datetime
-from codecs import utf_8_decode
-from codecs import utf_8_encode
-import os
 import time
+from codecs import utf_8_decode, utf_8_encode
+import logging
 
-from zope.interface import implementer
-
-from repoze.who.interfaces import IIdentifier
-from repoze.who.interfaces import IAuthenticator
+from webob import Request
 from repoze.who._compat import get_cookies
 import repoze.who._auth_tkt as auth_tkt
-from repoze.who._compat import STRING_TYPES
-from repoze.who._compat import u
+
+log = logging.getLogger(__name__)
 
 _NOW_TESTING = None  # unit tests can replace
 
@@ -23,15 +19,13 @@ def _now():  #pragma NO COVERAGE
     return datetime.datetime.now()
 
 
-@implementer(IIdentifier, IAuthenticator)
-class VisitorTrackerPlugin(object):
-
+class VisitorTracker(object):
     userid_type_decoders = {'int': int,
                             'unicode': lambda x: utf_8_decode(x)[0],
-                           }
+    }
 
     userid_type_encoders = {int: ('int', str),
-                           }
+    }
     try:
         userid_type_encoders[long] = ('int', str)
     except NameError: #pragma NO COVER Python >= 3.0
@@ -42,10 +36,10 @@ class VisitorTrackerPlugin(object):
     except NameError: #pragma NO COVER Python >= 3.0
         pass
 
-    def __init__(self, secret, cookie_name='visitor_tkt',
+    def __init__(self, secret=None, cookie_name='visitor_tkt',
                  secure=False, include_ip=False,
-                 timeout=None, reissue_time=None, userid_checker=None,
-                 on_missing_handler=None):
+                 timeout=None, reissue_time=None, user_id_checker=None,
+                 visitor_creator=None):
         self.secret = secret
         self.cookie_name = cookie_name
         self.include_ip = include_ip
@@ -55,24 +49,23 @@ class VisitorTrackerPlugin(object):
                              'be set to a lower value')
         self.timeout = timeout
         self.reissue_time = reissue_time
-        self.userid_checker = userid_checker
 
-        self.on_missing_handler = on_missing_handler
+        self.user_id_checker = user_id_checker
+        self.visitor_creator = visitor_creator
 
     # IIdentifier
     def identify(self, environ):
-        print 'identify'
+        log.debug('identify')
         cookies = get_cookies(environ)
         cookie = cookies.get(self.cookie_name)
         got_new_user = False
 
         if cookie is None or not cookie.value:
-            print 'no visitor cookie'
-            if not self.on_missing_handler:
+            log.debug('no visitor cookie')
+            if not self.visitor_creator:
                 return None
 
-            timestamp, userid, tokens, user_data \
-                = self.on_missing_handler(environ)
+            timestamp, user_id, tokens, user_data = self.visitor_creator(environ)
             got_new_user = True
 
         if not got_new_user:
@@ -82,18 +75,18 @@ class VisitorTrackerPlugin(object):
                 remote_addr = '0.0.0.0'
 
             try:
-                timestamp, userid, tokens, user_data = auth_tkt.parse_ticket(
+                timestamp, user_id, tokens, user_data = auth_tkt.parse_ticket(
                     self.secret, cookie.value, remote_addr)
             except auth_tkt.BadTicket:
+                log.debug('bad ticket')
                 return None
 
-        print 'identity:', environ.get('identity', None)
-        print '--->'
-        for key, value in sorted(environ.iteritems()):
-            print key, '=', value
-        print '<---'
+            if self.user_id_checker and not self.user_id_checker(user_id):
+                log.debug('invalid user_id')
+                return None
 
         if self.timeout and ( (timestamp + self.timeout) < time.time() ):
+            log.debug('timed out')
             return None
 
         userid_typename = 'userid_type:'
@@ -103,33 +96,26 @@ class VisitorTrackerPlugin(object):
                 userid_type = datum[len(userid_typename):]
                 decoder = self.userid_type_decoders.get(userid_type)
                 if decoder:
-                    userid = decoder(userid)
+                    user_id = decoder(user_id)
 
-        environ['REMOTE_USER'] = userid
-        environ['VISITOR_ID'] = userid
+        environ['VISITOR_ID'] = user_id
         environ['VISITOR_TOKENS'] = tokens
         environ['VISITOR_DATA'] = user_data
-        environ['AUTH_TYPE'] = 'visitor'
 
         identity = {}
         identity['timestamp'] = timestamp
-        identity['repoze.who.plugins.visitor_tracker.userid'] = userid
-        # identity['tokens'] = tokens
-        # identity['userdata'] = user_data
-        #return identity
-        self.remember(environ, identity)
+        identity['repoze.who.plugins.visitor_tracker.userid'] = user_id
+        identity['tokens'] = tokens
+        identity['userdata'] = user_data
 
-        #return None
+        return identity
 
-    # IIdentifier
     def forget(self, environ, identity):
-        print 'forgetting'
+        log.debug('forgetting')
         # return a set of expires Set-Cookie headers
         return self._get_cookies(environ, 'INVALID', 0)
 
-    # IIdentifier
     def remember(self, environ, identity):
-        print 'rememberer'
         if self.include_ip:
             remote_addr = environ['REMOTE_ADDR']
         else:
@@ -152,10 +138,9 @@ class VisitorTrackerPlugin(object):
         tokens = tuple(tokens)
 
         who_userid = identity['repoze.who.plugins.visitor_tracker.userid']
-        #who_tokens = tuple(identity.get('tokens', ()))
-        who_tokens = ()
-        #who_userdata = identity.get('userdata', '')
-        who_userdata = ''
+        log.debug('remembering: user_id=%r', who_userid)
+        who_tokens = tuple(identity.get('tokens', ()))
+        who_userdata = identity.get('userdata', '')
 
         encoding_data = self.userid_type_encoders.get(type(who_userid))
         if encoding_data:
@@ -168,7 +153,7 @@ class VisitorTrackerPlugin(object):
         new_data = (who_userid, who_tokens, who_userdata)
 
         if old_data != new_data or (self.reissue_time and
-                ( (timestamp + self.reissue_time) < time.time() )):
+            ((timestamp + self.reissue_time) < time.time())):
             ticket = auth_tkt.AuthTicket(
                 self.secret,
                 who_userid,
@@ -181,18 +166,7 @@ class VisitorTrackerPlugin(object):
 
             if old_cookie_value != new_cookie_value:
                 # return a set of Set-Cookie headers
-                print self._get_cookies(environ, new_cookie_value, max_age)
-
-    # IAuthenticator
-    def authenticate(self, environ, identity):
-        userid = identity.get('repoze.who.plugins.visitor_tracker.userid')
-        print 'authenticate: visitor=', userid
-        if userid is None:
-            return None
-        if self.userid_checker and not self.userid_checker(userid):
-            return None
-        #identity['repoze.who.userid'] = userid
-        return userid
+                return self._get_cookies(environ, new_cookie_value, max_age)
 
     def _get_cookies(self, environ, value, max_age=None):
         if max_age is not None:
@@ -215,13 +189,49 @@ class VisitorTrackerPlugin(object):
         wild_domain = '.' + cur_domain
         cookies = [
             ('Set-Cookie', '%s="%s"; Path=/%s%s' % (
-            self.cookie_name, value, max_age, secure)),
+                self.cookie_name, value, max_age, secure)),
             ('Set-Cookie', '%s="%s"; Path=/; Domain=%s%s%s' % (
-            self.cookie_name, value, cur_domain, max_age, secure)),
+                self.cookie_name, value, cur_domain, max_age, secure)),
             ('Set-Cookie', '%s="%s"; Path=/; Domain=%s%s%s' % (
-            self.cookie_name, value, wild_domain, max_age, secure))
-            ]
+                self.cookie_name, value, wild_domain, max_age, secure))
+        ]
         return cookies
+
+    def __call__(self, environ, request):
+        identity = self.identify(environ)
+        if identity:
+            return self.remember(environ, identity)
+        else:
+            return self.forget(environ, identity)
 
     def __repr__(self):
         return '<%s %s>' % (self.__class__.__name__, id(self))
+
+
+class VisitorTrackerMiddleware(object):
+    def __init__(self, application, config,
+                 tracker=VisitorTracker):
+        self.application = application
+        self.config = config
+
+        if isinstance(tracker, type):
+            self.tracker = tracker()
+        else:
+            self.tracker = tracker
+
+    def _set_cookies(self, response, headers):
+        log.debug('setting cookies')
+        for key, value in headers:
+            response.headers.add(key, value)
+            
+    def __call__(self, environ, start_response):
+        request = Request(environ)
+
+        headers = self.tracker(environ, request)
+
+        response = request.get_response(self.application)
+
+        if headers:
+            self._set_cookies(response, headers)
+
+        return response(environ, start_response)

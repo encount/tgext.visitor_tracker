@@ -11,7 +11,7 @@ setup(
     # installed or upgraded on the target machine
     install_requires=[
         'TurboGears2 >= 2.2.0',
-        #'repoze.who>=2.1b1'
+        'repoze.who>=2.1b1',
     ],
     include_package_data=True,
     package_data={
