@@ -219,11 +219,12 @@ class VisitorTrackerMiddleware(object):
         else:
             self.tracker = tracker
 
-    def _set_cookies(self, response, headers):
+    @staticmethod
+    def _set_cookies(response, headers):
         log.debug('setting cookies')
         for key, value in headers:
             response.headers.add(key, value)
-            
+
     def __call__(self, environ, start_response):
         request = Request(environ)
 
