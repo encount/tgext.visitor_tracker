@@ -1,12 +1,19 @@
 # -*- coding: utf-8 -*-
 import datetime
 import time
-from codecs import utf_8_decode, utf_8_encode
 import logging
 
-from webob import Request
+from codecs import utf_8_decode, utf_8_encode
+from zope.interface import implementer
 from repoze.who._compat import get_cookies
 import repoze.who._auth_tkt as auth_tkt
+from repoze.who.interfaces import IIdentifier, IMetadataProvider
+from repoze.who.interfaces import IAuthenticator
+from repoze.who._compat import get_cookies
+import repoze.who._auth_tkt as auth_tkt
+from repoze.who._compat import STRING_TYPES
+from repoze.who._compat import u
+
 
 log = logging.getLogger(__name__)
 
@@ -19,6 +26,7 @@ def _now():  #pragma NO COVERAGE
     return datetime.datetime.now()
 
 
+@implementer(IIdentifier)
 class VisitorTracker(object):
     userid_type_decoders = {'int': int,
                             'unicode': lambda x: utf_8_decode(x)[0],
@@ -39,7 +47,7 @@ class VisitorTracker(object):
     def __init__(self, secret=None, cookie_name='visitor_tkt',
                  secure=False, include_ip=False,
                  timeout=None, reissue_time=None, user_id_checker=None,
-                 visitor_creator=None):
+                 visitor_id_creator=None, is_authenticated_checker=None):
         self.secret = secret
         self.cookie_name = cookie_name
         self.include_ip = include_ip
@@ -51,7 +59,8 @@ class VisitorTracker(object):
         self.reissue_time = reissue_time
 
         self.user_id_checker = user_id_checker
-        self.visitor_creator = visitor_creator
+        self.visitor_id_creator = visitor_id_creator
+        self.is_authenticated_checker = is_authenticated_checker
 
     # IIdentifier
     def identify(self, environ):
@@ -60,12 +69,18 @@ class VisitorTracker(object):
         cookie = cookies.get(self.cookie_name)
         got_new_user = False
 
+        if self.is_authenticated_checker \
+            and self.is_authenticated_checker(environ):
+            log.debug('User is authenticated')
+            return None
+
         if cookie is None or not cookie.value:
-            log.debug('no visitor cookie')
-            if not self.visitor_creator:
+            log.debug('No visitor cookie')
+            if not self.visitor_id_creator:
                 return None
 
-            timestamp, user_id, tokens, user_data = self.visitor_creator(environ)
+            timestamp, user_id, tokens, user_data = self.visitor_id_creator(
+                environ)
             got_new_user = True
 
         if not got_new_user:
@@ -78,7 +93,7 @@ class VisitorTracker(object):
                 timestamp, user_id, tokens, user_data = auth_tkt.parse_ticket(
                     self.secret, cookie.value, remote_addr)
             except auth_tkt.BadTicket:
-                log.debug('bad ticket')
+                log.debug('Bad ticket')
                 return None
 
             if self.user_id_checker and not self.user_id_checker(user_id):
@@ -86,7 +101,7 @@ class VisitorTracker(object):
                 return None
 
         if self.timeout and ( (timestamp + self.timeout) < time.time() ):
-            log.debug('timed out')
+            log.debug('Timed out')
             return None
 
         userid_typename = 'userid_type:'
@@ -102,20 +117,42 @@ class VisitorTracker(object):
         environ['VISITOR_TOKENS'] = tokens
         environ['VISITOR_DATA'] = user_data
 
-        identity = {}
-        identity['timestamp'] = timestamp
-        identity['repoze.who.plugins.visitor_tracker.userid'] = user_id
-        identity['tokens'] = tokens
-        identity['userdata'] = user_data
+        identity = {
+            'timestamp': timestamp,
+            'repoze.who.plugins.visitor_tracker.userid': user_id,
+            'tokens': tokens,
+            'userdata': user_data,
+            'is_new_visitor': got_new_user,
+            }
 
-        return identity
+        environ['visitor_identity'] = identity
+        return None
 
+    @staticmethod
+    def remove_from_environ(environ):
+        for key in ['VISITOR_ID', 'VISITOR_TOKENS', 'VISITOR_DATA',
+                    'visitor_identity',]:
+            environ[key] = None
+
+    # IIdentifier
     def forget(self, environ, identity):
+        raise NotImplementedError, 'Should never be called, ' \
+                                   'but is needed for interface consistency.'
+
+    # IIdentifier
+    def remember(self, environ, identity):
+        raise NotImplementedError, 'Should never be called, ' \
+                                   'but is needed for interface consistency.'
+
+    def _forget(self, environ, identity):
         log.debug('forgetting')
+        self.remove_from_environ(environ)
+
         # return a set of expires Set-Cookie headers
         return self._get_cookies(environ, 'INVALID', 0)
 
-    def remember(self, environ, identity):
+    def _remember(self, environ, identity):
+        log.debug('remembering')
         if self.include_ip:
             remote_addr = environ['REMOTE_ADDR']
         else:
@@ -197,42 +234,5 @@ class VisitorTracker(object):
         ]
         return cookies
 
-    def __call__(self, environ, request):
-        identity = self.identify(environ)
-        if identity:
-            return self.remember(environ, identity)
-        else:
-            return self.forget(environ, identity)
-
     def __repr__(self):
         return '<%s %s>' % (self.__class__.__name__, id(self))
-
-
-class VisitorTrackerMiddleware(object):
-    def __init__(self, application, config,
-                 tracker=VisitorTracker):
-        self.application = application
-        self.config = config
-
-        if isinstance(tracker, type):
-            self.tracker = tracker()
-        else:
-            self.tracker = tracker
-
-    @staticmethod
-    def _set_cookies(response, headers):
-        log.debug('setting cookies')
-        for key, value in headers:
-            response.headers.add(key, value)
-
-    def __call__(self, environ, start_response):
-        request = Request(environ)
-
-        headers = self.tracker(environ, request)
-
-        response = request.get_response(self.application)
-
-        if headers:
-            self._set_cookies(response, headers)
-
-        return response(environ, start_response)
