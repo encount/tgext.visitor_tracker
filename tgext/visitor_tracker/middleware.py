@@ -20,10 +20,16 @@ log = logging.getLogger(__name__)
 _NOW_TESTING = None  # unit tests can replace
 
 
-def _now():  #pragma NO COVERAGE
+def _utcnow():  #pragma NO COVERAGE
+    """According to http://tools.ietf.org/html/rfc2616#section-3.3.1:
+
+        All HTTP date/time stamps MUST be represented in Greenwich Mean Time
+        (GMT), without exception. For the purposes of HTTP, GMT is exactly
+        equal to UTC (Coordinated Universal Time).
+    """
     if _NOW_TESTING is not None:
         return _NOW_TESTING
-    return datetime.datetime.now()
+    return datetime.datetime.utcnow()
 
 
 @implementer(IIdentifier)
@@ -47,12 +53,13 @@ class VisitorTracker(object):
     def __init__(self, secret=None, cookie_name='visitor_tkt',
                  secure=False, include_ip=False,
                  timeout=None, reissue_time=None, user_id_checker=None,
-                 visitor_id_creator=None, is_authenticated_checker=None):
+                 visitor_id_creator=None, is_authenticated_checker=None,
+                 **kwargs):
         self.secret = secret
         self.cookie_name = cookie_name
         self.include_ip = include_ip
         self.secure = secure
-        if timeout and ( (not reissue_time) or (reissue_time > timeout) ):
+        if timeout and ((not reissue_time) or (reissue_time > timeout)):
             raise ValueError('When timeout is specified, reissue_time must '
                              'be set to a lower value')
         self.timeout = timeout
@@ -61,6 +68,8 @@ class VisitorTracker(object):
         self.user_id_checker = user_id_checker
         self.visitor_id_creator = visitor_id_creator
         self.is_authenticated_checker = is_authenticated_checker
+
+        self.extra_args = kwargs
 
     # IIdentifier
     def identify(self, environ):
@@ -123,7 +132,8 @@ class VisitorTracker(object):
             'tokens': tokens,
             'userdata': user_data,
             'is_new_visitor': got_new_user,
-            }
+            'max_age': self.timeout,
+        }
 
         environ['visitor_identity'] = identity
         return None
@@ -131,8 +141,9 @@ class VisitorTracker(object):
     @staticmethod
     def remove_from_environ(environ):
         for key in ['VISITOR_ID', 'VISITOR_TOKENS', 'VISITOR_DATA',
-                    'visitor_identity',]:
-            environ[key] = None
+                    'visitor_identity', ]:
+            if key in environ:
+                del environ[key]
 
     # IIdentifier
     def forget(self, environ, identity):
@@ -190,7 +201,8 @@ class VisitorTracker(object):
         new_data = (who_userid, who_tokens, who_userdata)
 
         if old_data != new_data or (self.reissue_time and
-            ((timestamp + self.reissue_time) < time.time())):
+                                        ((timestamp + self.reissue_time)
+                                             < time.time())):
             ticket = auth_tkt.AuthTicket(
                 self.secret,
                 who_userid,
@@ -208,9 +220,10 @@ class VisitorTracker(object):
     def _get_cookies(self, environ, value, max_age=None):
         if max_age is not None:
             max_age = int(max_age)
-            later = _now() + datetime.timedelta(seconds=max_age)
+            later = _utcnow() + datetime.timedelta(seconds=max_age)
+            environ['VISITOR_NEW_EXPIRY_TIME'] = later
             # Wdy, DD-Mon-YY HH:MM:SS GMT
-            expires = later.strftime('%a, %d %b %Y %H:%M:%S')
+            expires = later.strftime('%a, %d %b %Y %H:%M:%S GMT')
             # the Expires header is *required* at least for IE7 (IE7 does
             # not respect Max-Age)
             max_age = "; Max-Age=%s; Expires=%s" % (max_age, expires)
