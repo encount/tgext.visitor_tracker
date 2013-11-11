@@ -1,5 +1,7 @@
 # -*- coding: utf-8 -*-
 import datetime
+from calendar import timegm
+from email.utils import formatdate
 import time
 import logging
 
@@ -223,7 +225,7 @@ class VisitorTracker(object):
             later = _utcnow() + datetime.timedelta(seconds=max_age)
             environ['VISITOR_NEW_EXPIRY_TIME'] = later
             # Wdy, DD-Mon-YY HH:MM:SS GMT
-            expires = later.strftime('%a, %d %b %Y %H:%M:%S GMT')
+            expires = formatdate(timegm(later.timetuple()), usegmt=True)
             # the Expires header is *required* at least for IE7 (IE7 does
             # not respect Max-Age)
             max_age = "; Max-Age=%s; Expires=%s" % (max_age, expires)
