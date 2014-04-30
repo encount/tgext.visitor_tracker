@@ -6,6 +6,7 @@ import time
 import logging
 
 from codecs import utf_8_decode, utf_8_encode
+from onlive.lib.cookies import _ignore_subdomains
 from zope.interface import implementer
 from repoze.who._compat import get_cookies
 import repoze.who._auth_tkt as auth_tkt
@@ -56,7 +57,7 @@ class VisitorTracker(object):
                  secure=False, include_ip=False,
                  timeout=None, reissue_time=None, user_id_checker=None,
                  visitor_id_creator=None, is_authenticated_checker=None,
-                 **kwargs):
+                 ignore_subdomains=False, **kwargs):
         self.secret = secret
         self.cookie_name = cookie_name
         self.include_ip = include_ip
@@ -70,6 +71,7 @@ class VisitorTracker(object):
         self.user_id_checker = user_id_checker
         self.visitor_id_creator = visitor_id_creator
         self.is_authenticated_checker = is_authenticated_checker
+        self.ignore_subdomains = ignore_subdomains
 
         self.extra_args = kwargs
 
@@ -219,7 +221,7 @@ class VisitorTracker(object):
                 # return a set of Set-Cookie headers
                 return self._get_cookies(environ, new_cookie_value, max_age)
 
-    def _get_cookies(self, environ, value, max_age=None):
+    def _core_get_cookies(self, environ, value, max_age=None):
         if max_age is not None:
             max_age = int(max_age)
             later = _utcnow() + datetime.timedelta(seconds=max_age)
@@ -248,6 +250,13 @@ class VisitorTracker(object):
                 self.cookie_name, value, wild_domain, max_age, secure))
         ]
         return cookies
+
+    def _get_cookies(self, environ, value, max_age=None):
+        if self.ignore_subdomains:
+            with _ignore_subdomains(environ):
+                return self._core_get_cookies(environ, value, max_age=max_age)
+
+        return self._core_get_cookies(environ, value, max_age=max_age)
 
     def __repr__(self):
         return '<%s %s>' % (self.__class__.__name__, id(self))
