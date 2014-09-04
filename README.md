@@ -1,4 +1,4 @@
 tgext.visitortrackermiddleware
 ==============================
 
-A visitor-tracker tgext module.
+A visitor-tracker TurboGears extension (tgext) module.
