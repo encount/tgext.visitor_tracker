@@ -7,6 +7,7 @@ import logging
 
 from codecs import utf_8_decode, utf_8_encode
 from onlive.lib.cookies import _ignore_subdomains
+from webob.cookies import serialize_cookie_date
 from zope.interface import implementer
 from repoze.who._compat import get_cookies
 import repoze.who._auth_tkt as auth_tkt
@@ -227,7 +228,7 @@ class VisitorTracker(object):
             later = _utcnow() + datetime.timedelta(seconds=max_age)
             environ['VISITOR_NEW_EXPIRY_TIME'] = later
             # Wdy, DD-Mon-YY HH:MM:SS GMT
-            expires = formatdate(timegm(later.timetuple()), usegmt=True)
+            expires = serialize_cookie_date(later)
             # the Expires header is *required* at least for IE7 (IE7 does
             # not respect Max-Age)
             max_age = "; Max-Age=%s; Expires=%s" % (max_age, expires)
