@@ -1,30 +1,25 @@
 # -*- coding: utf-8 -*-
 import datetime
-from calendar import timegm
-from email.utils import formatdate
-import time
+import hashlib
 import logging
-
+import time
 from codecs import utf_8_decode, utf_8_encode
+
+import repoze.who._auth_tkt as auth_tkt
 from onlive.lib.cookies import _ignore_subdomains
+from repoze.who._compat import get_cookies
+from repoze.who.interfaces import IIdentifier
 from webob.cookies import serialize_cookie_date
 from zope.interface import implementer
-from repoze.who._compat import get_cookies
-import repoze.who._auth_tkt as auth_tkt
-from repoze.who.interfaces import IIdentifier, IMetadataProvider
-from repoze.who.interfaces import IAuthenticator
-from repoze.who._compat import get_cookies
-import repoze.who._auth_tkt as auth_tkt
-from repoze.who._compat import STRING_TYPES
-from repoze.who._compat import u
-
 
 log = logging.getLogger(__name__)
 
 _NOW_TESTING = None  # unit tests can replace
 
+DEFAULT_DIGEST = hashlib.sha256
 
-def _utcnow():  #pragma NO COVERAGE
+
+def _utcnow():  # pragma NO COVERAGE
     """According to http://tools.ietf.org/html/rfc2616#section-3.3.1:
 
         All HTTP date/time stamps MUST be represented in Greenwich Mean Time
@@ -38,27 +33,29 @@ def _utcnow():  #pragma NO COVERAGE
 
 @implementer(IIdentifier)
 class VisitorTracker(object):
-    userid_type_decoders = {'int': int,
-                            'unicode': lambda x: utf_8_decode(x)[0],
+    userid_type_decoders = {
+        'int': int,
+        'unicode': lambda x: utf_8_decode(x)[0],
     }
 
-    userid_type_encoders = {int: ('int', str),
+    userid_type_encoders = {
+        int: ('int', str),
     }
     try:
         userid_type_encoders[long] = ('int', str)
-    except NameError: #pragma NO COVER Python >= 3.0
+    except NameError:  # pragma NO COVER Python >= 3.0
         pass
     try:
         userid_type_encoders[unicode] = ('unicode',
                                          lambda x: utf_8_encode(x)[0])
-    except NameError: #pragma NO COVER Python >= 3.0
+    except NameError:  # pragma NO COVER Python >= 3.0
         pass
 
     def __init__(self, secret=None, cookie_name='visitor_tkt',
                  secure=False, include_ip=False,
                  timeout=None, reissue_time=None, user_id_checker=None,
                  visitor_id_creator=None, is_authenticated_checker=None,
-                 ignore_subdomains=False, **kwargs):
+                 ignore_subdomains=False, digest_algo=DEFAULT_DIGEST, **kwargs):
         self.secret = secret
         self.cookie_name = cookie_name
         self.include_ip = include_ip
@@ -73,6 +70,7 @@ class VisitorTracker(object):
         self.visitor_id_creator = visitor_id_creator
         self.is_authenticated_checker = is_authenticated_checker
         self.ignore_subdomains = ignore_subdomains
+        self.digest_algo = digest_algo
 
         self.extra_args = kwargs
 
@@ -84,7 +82,7 @@ class VisitorTracker(object):
         got_new_user = False
 
         if self.is_authenticated_checker \
-            and self.is_authenticated_checker(environ):
+                and self.is_authenticated_checker(environ):
             log.debug('User is authenticated')
             return None
 
@@ -105,7 +103,8 @@ class VisitorTracker(object):
 
             try:
                 timestamp, user_id, tokens, user_data = auth_tkt.parse_ticket(
-                    self.secret, cookie.value, remote_addr)
+                    self.secret, cookie.value, remote_addr,
+                    digest_algo=self.digest_algo)
             except auth_tkt.BadTicket:
                 log.debug('Bad ticket')
                 return None
@@ -114,7 +113,7 @@ class VisitorTracker(object):
                 log.debug('invalid user_id')
                 return None
 
-        if self.timeout and ( (timestamp + self.timeout) < time.time() ):
+        if self.timeout and ((timestamp + self.timeout) < time.time()):
             log.debug('Timed out')
             return None
 
@@ -185,7 +184,8 @@ class VisitorTracker(object):
         if old_cookie_value:
             try:
                 timestamp, userid, tokens, userdata = auth_tkt.parse_ticket(
-                    self.secret, old_cookie_value, remote_addr)
+                    self.secret, old_cookie_value, remote_addr,
+                    digest_algo=self.digest_algo)
             except auth_tkt.BadTicket:
                 pass
         tokens = tuple(tokens)
@@ -215,7 +215,8 @@ class VisitorTracker(object):
                 tokens=who_tokens,
                 user_data=who_userdata,
                 cookie_name=self.cookie_name,
-                secure=self.secure)
+                secure=self.secure,
+                digest_algo=self.digest_algo)
             new_cookie_value = ticket.cookie_value()
 
             if old_cookie_value != new_cookie_value:
@@ -240,7 +241,7 @@ class VisitorTracker(object):
             secure = '; secure; HttpOnly'
 
         cur_domain = environ.get('HTTP_HOST', environ.get('SERVER_NAME'))
-        cur_domain = cur_domain.split(':')[0] # drop port
+        cur_domain = cur_domain.split(':')[0]  # drop port
         wild_domain = '.' + cur_domain
         cookies = [
             ('Set-Cookie', '%s="%s"; Path=/%s%s' % (
